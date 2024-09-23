@@ -17,14 +17,16 @@ pub fn spawn_collector(
     mut buf: AsyncPerfEventArrayBuffer<MapData>,
     canceled: CancellationToken,
     stack_trace_map: Arc<StackTraceMap<MapData>>,
+    min_event_size: u64,
+    max_event_size: u64,
 ) -> JoinHandle<Option<EventProcessor>> {
-    std::thread::spawn(|| {
+    std::thread::spawn(move || {
         let fut = async move {
             let mut buffers = (0..10)
                 .map(|_| BytesMut::with_capacity(1024 * 1024))
                 .collect::<Vec<_>>();
             let resolver = Resolver::new();
-            let mut processor = EventProcessor::new();
+            let mut processor = EventProcessor::new(min_event_size, max_event_size);
             loop {
                 let events = {
                     let read_events = buf.read_events(&mut buffers);
@@ -64,15 +66,19 @@ pub fn spawn_collector(
 
 #[derive(Clone, Debug)]
 pub struct EventProcessor {
+    min_event_size: u64,
+    max_event_size: u64,
     allocations_stats: FxHashMap<EventKey, AllocationStat>,
     resolved_traces: HashMap<u32, ResolvedStackTrace>,
 }
 
 impl EventProcessor {
-    pub fn new() -> Self {
+    pub fn new(min_event_size: u64, max_event_size: u64) -> Self {
         Self {
             allocations_stats: FxHashMap::with_capacity_and_hasher(1024, Default::default()),
             resolved_traces: Default::default(),
+            min_event_size,
+            max_event_size,
         }
     }
 
@@ -89,7 +95,7 @@ impl EventProcessor {
         let entry = self
             .allocations_stats
             .entry(key)
-            .or_insert_with(AllocationStat::new);
+            .or_insert_with(|| AllocationStat::new(self.max_event_size));
         entry.histogram.increment(event.size).unwrap();
         entry.total_size += event.size;
 
@@ -108,7 +114,9 @@ impl EventProcessor {
     pub fn merge(&self, other: Self) -> Self {
         let mut hashmap = self.allocations_stats.clone();
         for (key, hist) in other.allocations_stats {
-            let entry = hashmap.entry(key).or_insert_with(AllocationStat::new);
+            let entry = hashmap
+                .entry(key)
+                .or_insert_with(|| AllocationStat::new(self.max_event_size));
             *entry = entry.wrapping_add(&hist).unwrap();
         }
 
@@ -116,6 +124,8 @@ impl EventProcessor {
         resolved_traces.extend(other.resolved_traces);
 
         Self {
+            min_event_size: other.min_event_size,
+            max_event_size: other.max_event_size,
             allocations_stats: hashmap,
             resolved_traces,
         }
@@ -166,11 +176,20 @@ pub struct AllocationStat {
 }
 
 impl AllocationStat {
-    pub fn new() -> Self {
+    pub fn new(max_event_size: u64) -> Self {
+        // Find the largest power of 2 <= max_event_size
+        let max_power = 64 - max_event_size.leading_zeros();
+
+        // Use grouping_power of 1 to track only powers of 2
+        let grouping_power = 1;
+
+        // max_value_power is the power of the largest tracked value
+        let max_value_power = max_power.try_into().unwrap();
+
         Self {
             // A maximum trackable value of 2^20 - 1 = 1,048,575 bytes (just under 1MB)
             // A relative error of about 0.781% (2^-7)
-            histogram: Histogram::new(7, 20).unwrap(),
+            histogram: Histogram::new(grouping_power, max_value_power).unwrap(),
             total_size: 0,
         }
     }

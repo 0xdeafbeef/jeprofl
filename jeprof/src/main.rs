@@ -147,7 +147,13 @@ async fn main() -> Result<(), anyhow::Error> {
         let canceled = canceled.clone();
 
         //todo: config histogram
-        let handle = spawn_collector(buf, canceled, stack_traces.clone());
+        let handle = spawn_collector(
+            buf,
+            canceled,
+            stack_traces.clone(),
+            opt.min_alloc_size,
+            opt.max_alloc_size,
+        );
         joinset.push(handle);
     }
 
@@ -156,7 +162,7 @@ async fn main() -> Result<(), anyhow::Error> {
     info!("Exiting...");
     canceled.cancel();
 
-    let mut empty = EventProcessor::new();
+    let mut empty = EventProcessor::new(opt.min_alloc_size, opt.max_alloc_size);
     for handle in joinset {
         if let Some(processor) = handle.join().unwrap() {
             empty = empty.merge(processor);

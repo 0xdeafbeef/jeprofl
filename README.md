@@ -30,3 +30,10 @@ cargo xtask build
 ```bash
 RUST_LOG=info cargo xtask run
 ```
+
+# Todo
+
+- [ ] aggregate histogram in kernelspace. For now, we 're just dumping all the
+  data to userspace, which gives 1us overhead per call which is unacceptable.
+  Pure uprobe uses 20ns per call.
+- [ ] find which malloc is used (now we assume that target is statically linked)
