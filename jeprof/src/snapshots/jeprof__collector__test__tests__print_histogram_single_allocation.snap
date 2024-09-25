@@ -1,0 +1,8 @@
+---
+source: jeprof/src/collector.rs
+expression: buf
+---
+Size      | Count     | Percentage | Distribution
+----------+-----------+------------+--------------------------------------------------
+512 B      |         1 |    100.00% | ##################################################
+Total allocations: 1023 B in 1 allocations

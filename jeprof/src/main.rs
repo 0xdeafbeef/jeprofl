@@ -1,11 +1,11 @@
-use crate::collector::{spawn_collector, EventProcessor};
-use aya::maps::{Array, AsyncPerfEventArray, StackTraceMap};
+use crate::collector::spawn_collector;
+use anyhow::Context;
+use aya::maps::{Array, PerCpuHashMap, StackTraceMap};
 use aya::programs::UProbe;
-use aya::util::online_cpus;
 use aya::{include_bytes_aligned, Bpf};
 use aya_log::BpfLogger;
 use clap::Parser;
-use jeprof_common::MIN_ALLOC_SIZE;
+use jeprof_common::{Histogram, HistogramKey, MIN_ALLOC_SIZE};
 use log::{debug, info, warn};
 use minus::Pager;
 use std::fmt::Display;
@@ -135,39 +135,22 @@ async fn main() -> Result<(), anyhow::Error> {
 
     program.attach(Some(function.as_str()), 0, &opt.program, opt.pid)?;
 
-    let mut perf_array = AsyncPerfEventArray::try_from(bpf.take_map("EVENTS").unwrap())?;
-
-    let mut joinset = Vec::new();
     let canceled = tokio_util::sync::CancellationToken::new();
     let stack_traces = StackTraceMap::try_from(bpf.take_map("STACKTRACES").unwrap())?;
     let stack_traces = Arc::new(stack_traces);
 
-    for cpu_id in online_cpus()? {
-        let buf = perf_array.open(cpu_id, None)?;
-        let canceled = canceled.clone();
+    let per_cpu_map: PerCpuHashMap<_, HistogramKey, Histogram> =
+        PerCpuHashMap::try_from(bpf.take_map("HISTOGRAMS").unwrap())?;
 
-        //todo: config histogram
-        let handle = spawn_collector(
-            buf,
-            canceled,
-            stack_traces.clone(),
-            opt.min_alloc_size,
-            opt.max_alloc_size,
-        );
-        joinset.push(handle);
-    }
+    let canceled = canceled.clone();
+
+    //todo: config histogram
+    let handle = spawn_collector(per_cpu_map, canceled.clone(), stack_traces.clone());
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;
     info!("Exiting...");
     canceled.cancel();
-
-    let mut empty = EventProcessor::new(opt.min_alloc_size, opt.max_alloc_size);
-    for handle in joinset {
-        if let Some(processor) = handle.join().unwrap() {
-            empty = empty.merge(processor);
-        }
-    }
 
     // Initialize the pager
     let pager = Pager::new();
@@ -175,7 +158,11 @@ async fn main() -> Result<(), anyhow::Error> {
     let pager2 = pager.clone();
     let t = std::thread::spawn(move || minus::dynamic_paging(pager2));
 
-    empty.print_histogram(opt.order_by, pager)?;
+    let handle = handle
+        .join()
+        .expect("failed to join thread")
+        .context("nothing collected")?;
+    handle.print_histogram(opt.order_by, pager)?;
 
     t.join().unwrap()?;
 

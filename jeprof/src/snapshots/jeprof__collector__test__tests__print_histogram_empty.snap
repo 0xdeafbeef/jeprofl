@@ -1,0 +1,7 @@
+---
+source: jeprof/src/collector.rs
+expression: buf
+---
+Size      | Count     | Percentage | Distribution
+----------+-----------+------------+--------------------------------------------------
+Total allocations: 0 B in 0 allocations
