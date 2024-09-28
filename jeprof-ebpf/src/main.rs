@@ -2,15 +2,16 @@
 #![no_main]
 
 use aya_ebpf::bindings::BPF_F_USER_STACK;
+use aya_ebpf::helpers::bpf_get_smp_processor_id;
 use aya_ebpf::macros::map;
-use aya_ebpf::maps::{PerCpuHashMap, StackTrace};
-use aya_ebpf::{
-    helpers::bpf_get_current_pid_tgid, macros::uprobe, maps::Array, programs::ProbeContext,
+use aya_ebpf::maps::{PerCpuArray, PerCpuHashMap, StackTrace};
+use aya_ebpf::{helpers::bpf_get_current_pid_tgid, macros::uprobe, programs::ProbeContext};
+use jeprof_common::{
+    Histogram, HistogramKey, COUNT_INDEX, MAX_ALLOC_INDEX, MIN_ALLOC_INDEX, SAMPLE_EVERY_INDEX,
 };
-use jeprof_common::{Histogram, HistogramKey, MAX_ALLOC_INDEX, MIN_ALLOC_SIZE};
 
 #[map(name = "CONFIG")]
-static CONFIG: Array<u64> = Array::with_max_entries(2, 0);
+static STATE: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
 
 #[map(name = "STACKTRACES")]
 static mut STACKTRACES: StackTrace = StackTrace::with_max_entries(1024 * 1024, 0);
@@ -30,8 +31,12 @@ fn try_malloc(ctx: ProbeContext) -> Result<u32, u32> {
             return Err(0);
         };
 
-        let min_size = *CONFIG.get(MIN_ALLOC_SIZE).unwrap_or(&0);
-        let max_size = *CONFIG.get(MAX_ALLOC_INDEX).unwrap_or(&u64::MAX);
+        if !should_process() {
+            return Ok(0);
+        }
+
+        let min_size = *STATE.get(MIN_ALLOC_INDEX).unwrap_or(&0);
+        let max_size = *STATE.get(MAX_ALLOC_INDEX).unwrap_or(&u64::MAX);
 
         if size <= min_size || size >= max_size {
             return Ok(0);
@@ -43,14 +48,33 @@ fn try_malloc(ctx: ProbeContext) -> Result<u32, u32> {
             Err(_) => return Err(0),
         } as u32; // userspace stacks are always 32-bit
 
-        // update_hist(size, pid, stack_id);
+        let current_cpu = bpf_get_smp_processor_id();
+        update_hist(size, pid, stack_id, current_cpu)?;
     }
 
     Ok(0)
 }
 
-unsafe fn update_hist(size: u64, pid: u32, stack_id: u32) -> Result<u32, u32> {
-    let key = HistogramKey::new(pid, stack_id);
+fn should_process() -> bool {
+    let sample_every = match STATE.get(SAMPLE_EVERY_INDEX) {
+        None => {
+            return true;
+        }
+        Some(v) if *v == 0 => return true,
+        Some(v) => *v,
+    };
+    let Some(ctr) = STATE.get_ptr_mut(COUNT_INDEX) else {
+        return true;
+    };
+    let Some(ctr) = (unsafe { ctr.as_mut() }) else {
+        return true;
+    };
+    *ctr += 1;
+    (*ctr % sample_every) == 0
+}
+
+unsafe fn update_hist(size: u64, pid: u32, stack_id: u32, current_cpu: u32) -> Result<u32, u32> {
+    let key = HistogramKey::new(pid, stack_id, current_cpu as _);
     match HISTOGRAMS.get_ptr_mut(&key) {
         None => {
             let mut histogram = Histogram::new();

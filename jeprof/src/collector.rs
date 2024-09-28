@@ -1,63 +1,53 @@
 use crate::resolver::{ResolvedStackTrace, Resolver};
 use crate::OrderBy;
 use aya::maps::{MapData, PerCpuHashMap, StackTraceMap};
-use futures_util::future::Either;
-use jeprof_common::{Histogram, HistogramKey};
+
+use jeprof_common::{Histogram, HistogramKey, ReducedEventKey, UnpackedHistogramKey};
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread;
 use std::thread::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use std::time::Duration;
 
 pub fn spawn_collector(
     buf: PerCpuHashMap<MapData, HistogramKey, Histogram>,
-    canceled: CancellationToken,
+    canceled: Arc<AtomicBool>,
     stack_trace_map: Arc<StackTraceMap<MapData>>,
-) -> JoinHandle<Option<EventProcessor>> {
-    std::thread::spawn(move || {
-        let fut = async move {
-            let resolver = Resolver::new();
-            let mut processor = EventProcessor::new();
-            loop {
-                {
-                    let elapsed = tokio::time::sleep(std::time::Duration::from_secs(10));
-                    let canceled = canceled.cancelled();
+    skip_total_alloc_size_lower_than: u64,
+) -> JoinHandle<EventProcessor> {
+    thread::spawn(move || {
+        let resolver = Resolver::new();
+        let mut processor = EventProcessor::new();
 
-                    let read_events = std::pin::pin!(elapsed);
-                    let canceled = std::pin::pin!(canceled);
+        loop {
+            thread::sleep(Duration::from_secs(1));
+            if canceled.load(Ordering::Acquire) {
+                return processor;
+            }
 
-                    let res = futures_util::future::select(read_events, canceled).await;
-                    match res {
-                        Either::Left(_) => {}
-                        Either::Right(_) => {
-                            return Some(processor);
-                        }
+            for cpu in buf.iter() {
+                let (key, per_cpu_histograms) = cpu.unwrap();
+                let key = key.into_parts();
+                for hist in per_cpu_histograms.iter() {
+                    if hist.total < skip_total_alloc_size_lower_than {
+                        continue;
                     }
-                };
-
-                for cpu in buf.iter() {
-                    let (key, stacktrace) = cpu.unwrap();
-                    let (pid, stack_id) = key.into_parts();
-                    for hist in stacktrace.iter() {
-                        processor.process(pid, stack_id, hist, &resolver, &stack_trace_map);
+                    if canceled.load(Ordering::Acquire) {
+                        return processor;
                     }
+                    processor.process(key, hist, &resolver, &stack_trace_map);
                 }
             }
-        };
-
-        // resolver is !Send so we need to spawn the future on a local tokio runtime
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(fut)
+        }
     })
 }
 
 #[derive(Clone, Debug)]
 pub struct EventProcessor {
-    allocations_stats: FxHashMap<EventKey, Histogram>,
+    allocations_stats: FxHashMap<UnpackedHistogramKey, Histogram>,
     resolved_traces: HashMap<u32, ResolvedStackTrace>,
 }
 
@@ -71,25 +61,44 @@ impl EventProcessor {
 
     fn process(
         &mut self,
-        pid: u32,
-        stack_id: u32,
+        key: UnpackedHistogramKey,
         event: &Histogram,
         resolver: &Resolver,
         stacktrace_map: &Arc<StackTraceMap<MapData>>,
     ) {
-        let key = EventKey { pid, stack_id };
         self.allocations_stats.insert(key, *event); // just update with latest snapshot TODO: merge somehow
 
-        match self.resolved_traces.entry(stack_id) {
+        match self.resolved_traces.entry(key.stack_id) {
             Entry::Occupied(_) => {}
             Entry::Vacant(e) => {
-                let Ok(trace) = stacktrace_map.get(&stack_id, 0) else {
+                let Ok(trace) = stacktrace_map.get(&key.stack_id, 0) else {
                     return;
                 };
-                let stack_trace = resolver.resolve_stacktrace(&trace, pid).unwrap();
+                let stack_trace = match resolver.resolve_stacktrace(&trace, key.pid) {
+                    Ok(stacktrace) => stacktrace,
+                    Err(e) => {
+                        log::debug!("Failed to resolve {e}");
+                        return;
+                    }
+                };
                 e.insert(stack_trace);
             }
         }
+    }
+
+    fn merge(&self) -> FxHashMap<ReducedEventKey, Histogram> {
+        let mut allocations_stats: FxHashMap<ReducedEventKey, Histogram> =
+            FxHashMap::with_capacity_and_hasher(self.allocations_stats.len(), Default::default());
+
+        for (key, stat) in &self.allocations_stats {
+            match allocations_stats.entry(key.as_reduced()) {
+                Entry::Occupied(mut e) => e.get_mut().merge(stat),
+                Entry::Vacant(e) => {
+                    e.insert(*stat);
+                }
+            }
+        }
+        allocations_stats
     }
 
     pub fn print_histogram(
@@ -97,14 +106,13 @@ impl EventProcessor {
         order_by: OrderBy,
         mut pager: impl std::fmt::Write,
     ) -> anyhow::Result<()> {
-        let mut entries: Vec<(_, _)> = self
-            .allocations_stats
-            .iter()
-            .filter(|(_, hist)| hist.total > 0)
-            .collect();
+        let stats = self.merge();
+        writeln!(pager, "total stack traces: {}\n", stats.len())?;
+
+        let mut entries: Vec<(_, _)> = stats.iter().filter(|(_, hist)| hist.total > 0).collect();
 
         match order_by {
-            OrderBy::Size => {
+            OrderBy::Count => {
                 entries.sort_by_key(|(_, hist)| hist.data.iter().sum::<u64>());
             }
             OrderBy::Traffic => {
@@ -112,15 +120,31 @@ impl EventProcessor {
             }
         }
         for (key, hist) in entries {
-            let resolved_trace = self.resolved_traces.get(&key.stack_id).unwrap();
-            for fun in resolved_trace.symbols.iter() {
-                writeln!(pager, "{} - {}", fun.address, fun.symbol)?;
+            print_section(&mut pager, '*')?;
+
+            if let Some(resolved_trace) = self.resolved_traces.get(&key.stack_id) {
+                for fun in resolved_trace.symbols.iter() {
+                    writeln!(pager, "{} - {}", fun.address, fun.symbol)?;
+                }
+            } else {
+                writeln!(pager, "No resolved stacktrace")?;
             }
+
+            print_section(&mut pager, '-')?;
+
             print_histogram(hist, &mut pager)?;
+            writeln!(&mut pager, "\n")?;
         }
 
         Ok(())
     }
+}
+
+fn print_section(mut pager: impl std::fmt::Write, char: char) -> anyhow::Result<()> {
+    let string = (0..80).map(|_| char).collect::<String>();
+    pager.write_str(&string)?;
+    pager.write_char('\n')?;
+    Ok(())
 }
 
 pub(crate) fn print_histogram(
@@ -173,13 +197,9 @@ pub(crate) fn print_histogram(
 
     Ok(())
 }
+
 fn size_bytes(size: usize) -> u64 {
     1u64 << size
-}
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-struct EventKey {
-    pid: u32,
-    stack_id: u32,
 }
 
 #[cfg(test)]

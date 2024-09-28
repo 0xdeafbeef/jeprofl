@@ -1,3 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["xtask", "jeprof", "jeprof-common"]
+
+[patch.crates-io]
+aya = { git = "https://github.com/0xdeafbeef/aya.git", branch = "0xdeafbeef/push-tptmkyzwvtxy" }
+aya-log = { git = "https://github.com/0xdeafbeef/aya.git", branch = "0xdeafbeef/push-tptmkyzwvtxy" }
+aya-ebpf = { git = "https://github.com/0xdeafbeef/aya.git", branch = "0xdeafbeef/push-tptmkyzwvtxy" }
+aya-log-ebpf = { git = "https://github.com/0xdeafbeef/aya.git", branch = "0xdeafbeef/push-tptmkyzwvtxy" }

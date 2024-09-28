@@ -10,18 +10,18 @@ aya-log = "0.2"
 clap = { version = "4.1", features = ["derive"] }
 jeprof-common = { path = "../jeprof-common", features = ["user"] }
 anyhow = "1"
-env_logger = "0.10"
+env_logger = "0.11.5"
 libc = "0.2"
 log = "0.4"
-tokio = { version = "1.25", features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
-tokio-util = { version = "0.7.12", features = ["full"] }
-futures-util = "0.3.30"
+tokio = { version = "1.25", features = ["macros", "rt", "rt-multi-thread", "net", "signal", "time"] }
 blazesym = "0.2.0-rc.1"
 rustc-hash = "2.0.0"
 bytesize = "1.3.0"
 derive_more = { version = "1.0.0", features = ["full"] }
 minus = { version = "5.6.1", features = ["dynamic_output"] }
 insta = "1.40.0"
+crossterm = "0.27"
+scopeguard = "1.2.0"
 
 [[bin]]
 name = "jeprof"

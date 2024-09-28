@@ -23,6 +23,7 @@ fn build_project(opts: &Options) -> Result<(), anyhow::Error> {
     }
     let status = Command::new("cargo")
         .args(&args)
+        .env("RUSTFLAGS", "-Cforce-frame-pointers=true")
         .status()
         .expect("failed to build userspace");
     assert!(status.success());

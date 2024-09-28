@@ -1,17 +1,24 @@
 use crate::collector::spawn_collector;
-use anyhow::Context;
-use aya::maps::{Array, PerCpuHashMap, StackTraceMap};
+use aya::maps::{PerCpuArray, PerCpuHashMap, PerCpuValues, StackTraceMap};
 use aya::programs::UProbe;
-use aya::{include_bytes_aligned, Bpf};
-use aya_log::BpfLogger;
+use aya::util::nr_cpus;
+use aya::{include_bytes_aligned, Ebpf};
+
+use aya_log::EbpfLogger;
+use bytesize::ByteSize;
 use clap::Parser;
-use jeprof_common::{Histogram, HistogramKey, MIN_ALLOC_SIZE};
+use jeprof_common::{
+    Histogram, HistogramKey, COUNT_INDEX, MAX_ALLOC_INDEX, MIN_ALLOC_INDEX, SAMPLE_EVERY_INDEX,
+};
 use log::{debug, info, warn};
-use minus::Pager;
+use minus::{ExitStrategy, Pager};
 use std::fmt::Display;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::signal;
 
 mod collector;
@@ -31,16 +38,28 @@ struct Opt {
     #[clap(short, long, default_value = "Size")]
     order_by: OrderBy,
 
+    /// Max alloc size to track
     #[clap(short, long, default_value_t = u64::MAX)]
     max_alloc_size: u64,
+    /// Min allocation size to track
     #[clap(short, long)]
     #[clap(default_value_t = 0)]
     min_alloc_size: u64,
+
+    /// Specify the sampling interval for events.
+    /// For example, '1' samples every event, '1000' samples every 1000th event.
+    #[clap(short, long)]
+    #[clap(default_value_t = NonZeroU32::new(1).unwrap())]
+    sample_every: NonZeroU32,
+
+    /// skip allocations with total alocated < `skip` bytes
+    #[clap(short, long, default_value_t = ByteSize(1))]
+    skip: ByteSize,
 }
 
 #[derive(derive_more::Display, derive_more::FromStr, Debug, Copy, Clone)]
 enum OrderBy {
-    Size,
+    Count,
     Traffic,
 }
 
@@ -85,6 +104,9 @@ impl Display for JemallocAllocFunctions {
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
+    scopeguard::defer! {
+          crossterm::execute!(std::io::stdout(),crossterm::cursor::Show).ok();
+    };
     let opt = Opt::parse();
 
     env_logger::init();
@@ -105,22 +127,38 @@ async fn main() -> Result<(), anyhow::Error> {
     // like to specify the eBPF program at runtime rather than at compile-time, you can
     // reach for `Bpf::load_file` instead.
     #[cfg(debug_assertions)]
-    let mut bpf = Bpf::load(include_bytes_aligned!(
+    let mut bpf = Ebpf::load(include_bytes_aligned!(
         "../../target/bpfel-unknown-none/debug/jeprof"
     ))?;
     #[cfg(not(debug_assertions))]
-    let mut bpf = Bpf::load(include_bytes_aligned!(
+    let mut bpf = Ebpf::load(include_bytes_aligned!(
         "../../target/bpfel-unknown-none/release/jeprof"
     ))?;
-    if let Err(e) = BpfLogger::init(&mut bpf) {
+    if let Err(e) = EbpfLogger::init(&mut bpf) {
         // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {}", e);
     }
+
     {
         let config_map = bpf.map_mut("CONFIG").expect("CONFIG not found");
-        let mut config_map = Array::try_from(config_map)?;
-        config_map.set(MIN_ALLOC_SIZE, opt.min_alloc_size, 0)?;
-        config_map.set(1, opt.max_alloc_size, 0)?;
+        let mut config_map = PerCpuArray::try_from(config_map)?;
+        let num_cpus = nr_cpus()?;
+        config_map.set(
+            MIN_ALLOC_INDEX,
+            PerCpuValues::try_from(vec![opt.min_alloc_size; num_cpus])?,
+            0,
+        )?;
+        config_map.set(
+            MAX_ALLOC_INDEX,
+            PerCpuValues::try_from(vec![opt.max_alloc_size; num_cpus])?,
+            0,
+        )?;
+        config_map.set(COUNT_INDEX, PerCpuValues::try_from(vec![0; num_cpus])?, 0)?;
+        config_map.set(
+            SAMPLE_EVERY_INDEX,
+            PerCpuValues::try_from(vec![opt.sample_every.get() as u64; num_cpus])?,
+            0,
+        )?;
     }
 
     let program: &mut UProbe = bpf.program_mut("malloc").unwrap().try_into()?;
@@ -135,36 +173,52 @@ async fn main() -> Result<(), anyhow::Error> {
 
     program.attach(Some(function.as_str()), 0, &opt.program, opt.pid)?;
 
-    let canceled = tokio_util::sync::CancellationToken::new();
     let stack_traces = StackTraceMap::try_from(bpf.take_map("STACKTRACES").unwrap())?;
     let stack_traces = Arc::new(stack_traces);
 
+    let start = std::time::Instant::now();
     let per_cpu_map: PerCpuHashMap<_, HistogramKey, Histogram> =
         PerCpuHashMap::try_from(bpf.take_map("HISTOGRAMS").unwrap())?;
+    log::info!(
+        "Opened per_cpu_map, took {:?}",
+        start.elapsed().as_secs_f64()
+    );
+    log::info!(
+        "Will not save stack traces which has total alocation size < {}",
+        opt.skip
+    );
 
-    let canceled = canceled.clone();
-
-    //todo: config histogram
-    let handle = spawn_collector(per_cpu_map, canceled.clone(), stack_traces.clone());
+    let canceled = Arc::new(AtomicBool::new(false));
+    let handle = spawn_collector(
+        per_cpu_map,
+        canceled.clone(),
+        stack_traces.clone(),
+        opt.skip.0,
+    );
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;
     info!("Exiting...");
-    canceled.cancel();
+    canceled.store(true, std::sync::atomic::Ordering::Release);
+    // to reduce the probability of installing 2 signal handlers
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Initialize the pager
-    let pager = Pager::new();
+    let mut pager = Pager::new();
+    pager.set_exit_strategy(ExitStrategy::PagerQuit)?;
     // Run the pager in a separate thread
-    let pager2 = pager.clone();
-    let t = std::thread::spawn(move || minus::dynamic_paging(pager2));
+    let t = {
+        let pager = pager.clone();
+        std::thread::spawn(move || minus::dynamic_paging(pager))
+    };
 
-    let handle = handle
-        .join()
-        .expect("failed to join thread")
-        .context("nothing collected")?;
-    handle.print_histogram(opt.order_by, pager)?;
+    let handle = handle.join().expect("failed to join thread");
+
+    // let mut str = String::new();
+    handle.print_histogram(opt.order_by, &mut pager)?;
 
     t.join().unwrap()?;
 
+    log::info!("Exited");
     Ok(())
 }
