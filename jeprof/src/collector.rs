@@ -13,14 +13,17 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 pub fn spawn_collector(
-    buf: PerCpuHashMap<MapData, HistogramKey, Histogram>,
+    mut buf: PerCpuHashMap<MapData, HistogramKey, Histogram>,
     canceled: Arc<AtomicBool>,
-    stack_trace_map: Arc<StackTraceMap<MapData>>,
+    mut stack_trace_map: StackTraceMap<MapData>,
     skip_total_alloc_size_lower_than: u64,
+    skip_total_count_lower_than: u64,
 ) -> JoinHandle<EventProcessor> {
     thread::spawn(move || {
         let resolver = Resolver::new();
         let mut processor = EventProcessor::new();
+
+        let mut keys_to_drop = Vec::new();
 
         loop {
             thread::sleep(Duration::from_secs(1));
@@ -28,18 +31,32 @@ pub fn spawn_collector(
                 return processor;
             }
 
-            for cpu in buf.iter() {
-                let (key, per_cpu_histograms) = cpu.unwrap();
-                let key = key.into_parts();
+            let mut was_skiped_on_cpus = true;
+            for val in buf.iter() {
+                let (key, per_cpu_histograms) = val.unwrap();
+                let unpacked_key = key.into_parts();
+                // per cpu histograms
                 for hist in per_cpu_histograms.iter() {
-                    if hist.total < skip_total_alloc_size_lower_than {
+                    if hist.total < skip_total_alloc_size_lower_than
+                        && hist.total_count() < skip_total_count_lower_than
+                    {
                         continue;
                     }
+                    was_skiped_on_cpus = false;
                     if canceled.load(Ordering::Acquire) {
                         return processor;
                     }
-                    processor.process(key, hist, &resolver, &stack_trace_map);
+                    processor.process(unpacked_key, hist, &resolver, &stack_trace_map);
                 }
+
+                if was_skiped_on_cpus {
+                    keys_to_drop.push(key);
+                }
+            }
+            for key in keys_to_drop.drain(..) {
+                let unpacked_key = key.into_parts();
+                buf.remove(&key).unwrap();
+                stack_trace_map.remove(&unpacked_key.stack_id).unwrap()
             }
         }
     })
@@ -64,7 +81,7 @@ impl EventProcessor {
         key: UnpackedHistogramKey,
         event: &Histogram,
         resolver: &Resolver,
-        stacktrace_map: &Arc<StackTraceMap<MapData>>,
+        stacktrace_map: &StackTraceMap<MapData>,
     ) {
         self.allocations_stats.insert(key, *event); // just update with latest snapshot TODO: merge somehow
 

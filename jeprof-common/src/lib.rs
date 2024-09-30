@@ -100,4 +100,8 @@ impl Histogram {
             *l = l.saturating_add(*r);
         }
     }
+
+    pub fn total_count(&self) -> u64 {
+        self.data.iter().sum()
+    }
 }

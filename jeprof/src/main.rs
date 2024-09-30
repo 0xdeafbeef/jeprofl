@@ -52,9 +52,13 @@ struct Opt {
     #[clap(default_value_t = NonZeroU32::new(1).unwrap())]
     sample_every: NonZeroU32,
 
-    /// skip allocations with total alocated < `skip` bytes
+    /// skip allocations with total alocated < `skip_size` bytes
     #[clap(short, long, default_value_t = ByteSize(1))]
-    skip: ByteSize,
+    skip_size: ByteSize,
+
+    /// Skips stack traces with total count < `skip_count`
+    #[clap(long, default_value_t = 1000)]
+    skip_count: u64,
 }
 
 #[derive(derive_more::Display, derive_more::FromStr, Debug, Copy, Clone)]
@@ -174,7 +178,6 @@ async fn main() -> Result<(), anyhow::Error> {
     program.attach(Some(function.as_str()), 0, &opt.program, opt.pid)?;
 
     let stack_traces = StackTraceMap::try_from(bpf.take_map("STACKTRACES").unwrap())?;
-    let stack_traces = Arc::new(stack_traces);
 
     let start = std::time::Instant::now();
     let per_cpu_map: PerCpuHashMap<_, HistogramKey, Histogram> =
@@ -184,16 +187,18 @@ async fn main() -> Result<(), anyhow::Error> {
         start.elapsed().as_secs_f64()
     );
     log::info!(
-        "Will not save stack traces which has total alocation size < {}",
-        opt.skip
+        "Will not save stack traces which has total alocation size < {} or count < {}",
+        opt.skip_count,
+        opt.skip_size
     );
 
     let canceled = Arc::new(AtomicBool::new(false));
     let handle = spawn_collector(
         per_cpu_map,
         canceled.clone(),
-        stack_traces.clone(),
-        opt.skip.0,
+        stack_traces,
+        opt.skip_size.0,
+        opt.skip_count,
     );
 
     info!("Waiting for Ctrl-C...");
