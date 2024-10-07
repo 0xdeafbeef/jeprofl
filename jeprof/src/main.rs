@@ -8,7 +8,8 @@ use aya_log::EbpfLogger;
 use bytesize::ByteSize;
 use clap::Parser;
 use jeprof_common::{
-    Histogram, HistogramKey, COUNT_INDEX, MAX_ALLOC_INDEX, MIN_ALLOC_INDEX, SAMPLE_EVERY_INDEX,
+    Histogram, HistogramKey, COUNT_INDEX, FUNCTION_INFO_INDEX, MAX_ALLOC_INDEX, MIN_ALLOC_INDEX,
+    SAMPLE_EVERY_INDEX,
 };
 use log::{debug, info, warn};
 use minus::{ExitStrategy, Pager};
@@ -59,6 +60,9 @@ struct Opt {
     /// Skips stack traces with total count < `skip_count`
     #[clap(long, default_value_t = 1000)]
     skip_count: u64,
+
+    #[clap(long("csv"))]
+    csv_path: Option<PathBuf>,
 }
 
 #[derive(derive_more::Display, derive_more::FromStr, Debug, Copy, Clone)]
@@ -102,6 +106,26 @@ impl Display for JemallocAllocFunctions {
             Self::Mallocx => write!(f, "mallocx"),
             Self::Rallocx => write!(f, "rallocx"),
             Self::Xallocx => write!(f, "xallocx"),
+        }
+    }
+}
+
+impl JemallocAllocFunctions {
+    // void *malloc(	size_t size);
+    //
+    // void *calloc(	size_t number,
+    // size_t size);
+    //
+    // void *realloc(	void *ptr,
+    // size_t size);
+    pub fn allocation_arg_index(&self) -> u64 {
+        match self {
+            Self::Malloc => 0,
+            Self::Calloc => 1,
+            Self::Realloc => 1,
+            Self::Mallocx => 1,
+            Self::Rallocx => 1,
+            Self::Xallocx => 1,
         }
     }
 }
@@ -163,6 +187,11 @@ async fn main() -> Result<(), anyhow::Error> {
             PerCpuValues::try_from(vec![opt.sample_every.get() as u64; num_cpus])?,
             0,
         )?;
+        config_map.set(
+            FUNCTION_INFO_INDEX,
+            PerCpuValues::try_from(vec![opt.function.allocation_arg_index(); num_cpus])?,
+            0,
+        )?;
     }
 
     let program: &mut UProbe = bpf.program_mut("malloc").unwrap().try_into()?;
@@ -220,7 +249,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let handle = handle.join().expect("failed to join thread");
 
     // let mut str = String::new();
-    handle.print_histogram(opt.order_by, &mut pager)?;
+    handle.print_histogram(opt.order_by, &mut pager, opt.csv_path)?;
 
     t.join().unwrap()?;
 

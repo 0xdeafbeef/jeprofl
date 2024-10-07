@@ -3,9 +3,9 @@ use crate::OrderBy;
 use aya::maps::{MapData, PerCpuHashMap, StackTraceMap};
 
 use jeprof_common::{Histogram, HistogramKey, ReducedEventKey, UnpackedHistogramKey};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -23,7 +23,8 @@ pub fn spawn_collector(
         let resolver = Resolver::new();
         let mut processor = EventProcessor::new();
 
-        let mut keys_to_drop = Vec::new();
+        let mut keys_to_drop = FxHashSet::default();
+        let mut last_clean_up = std::time::Instant::now();
 
         loop {
             thread::sleep(Duration::from_secs(1));
@@ -50,22 +51,27 @@ pub fn spawn_collector(
                 }
 
                 if was_skiped_on_cpus {
-                    keys_to_drop.push(key);
+                    keys_to_drop.insert(key);
+                } else {
+                    keys_to_drop.remove(&key);
                 }
             }
-            for key in keys_to_drop.drain(..) {
-                let unpacked_key = key.into_parts();
-                buf.remove(&key).unwrap();
-                stack_trace_map.remove(&unpacked_key.stack_id).unwrap()
+
+            if last_clean_up.elapsed() > Duration::from_secs(60) {
+                for key in keys_to_drop.drain() {
+                    let unpacked_key = key.into_parts();
+                    buf.remove(&key).ok(); // it may be already deleted
+                    stack_trace_map.remove(&unpacked_key.stack_id).ok();
+                }
+                last_clean_up = std::time::Instant::now();
             }
         }
     })
 }
-
 #[derive(Clone, Debug)]
 pub struct EventProcessor {
     allocations_stats: FxHashMap<UnpackedHistogramKey, Histogram>,
-    resolved_traces: HashMap<u32, ResolvedStackTrace>,
+    resolved_traces: FxHashMap<u32, ResolvedStackTrace>,
 }
 
 impl EventProcessor {
@@ -122,6 +128,7 @@ impl EventProcessor {
         &self,
         order_by: OrderBy,
         mut pager: impl std::fmt::Write,
+        csv_path: Option<PathBuf>,
     ) -> anyhow::Result<()> {
         let stats = self.merge();
         writeln!(pager, "total stack traces: {}\n", stats.len())?;
@@ -136,7 +143,9 @@ impl EventProcessor {
                 entries.sort_by_key(|(_, hist)| hist.total);
             }
         }
-        for (key, hist) in entries {
+
+        let mut csv_writer = CsvWriter::new(csv_path)?;
+        for (key, hist) in &entries {
             print_section(&mut pager, '*')?;
 
             if let Some(resolved_trace) = self.resolved_traces.get(&key.stack_id) {
@@ -151,7 +160,9 @@ impl EventProcessor {
 
             print_histogram(hist, &mut pager)?;
             writeln!(&mut pager, "\n")?;
+            csv_writer.write(key, hist, self)?;
         }
+        csv_writer.finish()?;
 
         Ok(())
     }
@@ -217,6 +228,75 @@ pub(crate) fn print_histogram(
 
 fn size_bytes(size: usize) -> u64 {
     1u64 << size
+}
+
+struct CsvWriter {
+    writer: Option<csv::Writer<std::io::BufWriter<std::fs::File>>>,
+}
+
+impl CsvWriter {
+    pub fn new(path: Option<PathBuf>) -> anyhow::Result<Self> {
+        const HEADERS: [&str; 6] = [
+            "pid",
+            "stack_id",
+            "total",
+            "count",
+            "histogram",
+            "stacktrace",
+        ];
+        let writer = match path {
+            Some(path) => {
+                let mut writer = csv::Writer::from_writer(std::io::BufWriter::new(
+                    std::fs::File::create(&path)?,
+                ));
+                writer.write_record(HEADERS)?;
+                Some(writer)
+            }
+            None => None,
+        };
+
+        Ok(Self { writer })
+    }
+
+    pub fn write(
+        &mut self,
+        key: &ReducedEventKey,
+        hist: &Histogram,
+        processor: &EventProcessor,
+    ) -> anyhow::Result<()> {
+        if let Some(writer) = &mut self.writer {
+            let stacktrace = processor
+                .resolved_traces
+                .get(&key.stack_id)
+                .map(|trace| {
+                    trace
+                        .symbols
+                        .iter()
+                        .map(|fun| format!("{:x} - {}", fun.address, fun.symbol))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_else(|| "No resolved stacktrace".to_string());
+            let mut histogram = String::new();
+            print_histogram(hist, &mut histogram)?;
+            writer.serialize((
+                key.pid,
+                key.stack_id,
+                hist.total,
+                hist.data.iter().sum::<u64>(),
+                histogram,
+                stacktrace,
+            ))?;
+        }
+        Ok(())
+    }
+
+    pub fn finish(self) -> anyhow::Result<()> {
+        if let Some(mut writer) = self.writer {
+            writer.flush()?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

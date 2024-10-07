@@ -7,11 +7,12 @@ use aya_ebpf::macros::map;
 use aya_ebpf::maps::{PerCpuArray, PerCpuHashMap, StackTrace};
 use aya_ebpf::{helpers::bpf_get_current_pid_tgid, macros::uprobe, programs::ProbeContext};
 use jeprof_common::{
-    Histogram, HistogramKey, COUNT_INDEX, MAX_ALLOC_INDEX, MIN_ALLOC_INDEX, SAMPLE_EVERY_INDEX,
+    Histogram, HistogramKey, COUNT_INDEX, FUNCTION_INFO_INDEX, MAX_ALLOC_INDEX, MIN_ALLOC_INDEX,
+    SAMPLE_EVERY_INDEX,
 };
 
 #[map(name = "CONFIG")]
-static STATE: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
+static STATE: PerCpuArray<u64> = PerCpuArray::with_max_entries(5, 0);
 
 #[map(name = "STACKTRACES")]
 static mut STACKTRACES: StackTrace = StackTrace::with_max_entries(1024 * 1024, 0);
@@ -27,13 +28,29 @@ pub fn malloc(ctx: ProbeContext) -> u32 {
 
 fn try_malloc(ctx: ProbeContext) -> Result<u32, u32> {
     unsafe {
-        let Some(size) = ctx.arg::<u64>(0) else {
-            return Err(0);
-        };
-
+        const ARG_INDEX: usize = 0;
         if !should_process() {
             return Ok(0);
         }
+        // todo: somehow make solver to believe that arg lies in the range [0, 3] to allow dynamic profiling
+        // let Some(arg_index) = STATE.get(FUNCTION_INFO_INDEX).copied() else {
+        //     return Err(0);
+        // };
+        //
+        // let Some(arg_index) = STATE.get(FUNCTION_INFO_INDEX).copied() else {
+        //     return Err(0);
+        // };
+        //
+        // if !check_bounds_unsigned(arg_index as _, 0, 3) {
+        //     return Err(0);
+        // }
+        //
+        // let arg_index = arg_index as usize;
+
+        let size = match ctx.arg::<u64>(ARG_INDEX) {
+            Some(s) => s,
+            None => return Err(0),
+        };
 
         let min_size = *STATE.get(MIN_ALLOC_INDEX).unwrap_or(&0);
         let max_size = *STATE.get(MAX_ALLOC_INDEX).unwrap_or(&u64::MAX);

@@ -4,6 +4,7 @@ pub const MIN_ALLOC_INDEX: u32 = 0;
 pub const MAX_ALLOC_INDEX: u32 = 1;
 pub const COUNT_INDEX: u32 = 2;
 pub const SAMPLE_EVERY_INDEX: u32 = 3;
+pub const FUNCTION_INFO_INDEX: u32 = 4;
 
 const MAX_TRACKED_ALLOCATION_SIZE: usize = const {
     const GIB: usize = 1024 * 1024 * 1024;
@@ -12,7 +13,7 @@ const MAX_TRACKED_ALLOCATION_SIZE: usize = const {
 };
 
 #[repr(C)]
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Debug, Copy, Hash, PartialEq, Eq)]
 pub struct HistogramKey {
     pid_stack: u64,
     cpu: u64, // for alignment
