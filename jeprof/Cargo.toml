@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-aya = "0.12"
+aya = "0.13.0"
 aya-log = "0.2"
 clap = { version = "4.1", features = ["derive"] }
 jeprof-common = { path = "../jeprof-common", features = ["user"] }
