@@ -6,7 +6,7 @@ use aya_ebpf::helpers::bpf_get_smp_processor_id;
 use aya_ebpf::macros::map;
 use aya_ebpf::maps::{PerCpuArray, PerCpuHashMap, StackTrace};
 use aya_ebpf::{helpers::bpf_get_current_pid_tgid, macros::uprobe, programs::ProbeContext};
-use jeprof_common::{
+use jeprofl_common::{
     Histogram, HistogramKey, COUNT_INDEX, FUNCTION_INFO_INDEX, MAX_ALLOC_INDEX, MIN_ALLOC_INDEX,
     SAMPLE_EVERY_INDEX,
 };

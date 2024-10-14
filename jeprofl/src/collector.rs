@@ -3,7 +3,7 @@ use crate::OrderBy;
 use aya::maps::{MapData, PerCpuHashMap, StackTraceMap};
 
 use itertools::Itertools;
-use jeprof_common::{Histogram, HistogramKey, ReducedEventKey, UnpackedHistogramKey};
+use jeprofl_common::{Histogram, HistogramKey, ReducedEventKey, UnpackedHistogramKey};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
 use std::io::BufWriter;
@@ -340,7 +340,7 @@ impl CsvWriter {
 #[cfg(test)]
 mod test {
     use crate::collector::print_histogram;
-    use jeprof_common::Histogram;
+    use jeprofl_common::Histogram;
 
     #[cfg(test)]
     mod tests {

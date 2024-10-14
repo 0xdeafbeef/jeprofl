@@ -40,14 +40,9 @@ pub struct Options {
 }
 
 pub fn build_ebpf(opts: Options) -> Result<(), anyhow::Error> {
-    let dir = PathBuf::from("jeprof-ebpf");
+    let dir = PathBuf::from("jeprofl-ebpf");
     let target = format!("--target={}", opts.target);
-    let mut args = vec![
-        "build",
-        target.as_str(),
-        "-Z",
-        "build-std=core",
-    ];
+    let mut args = vec!["build", target.as_str(), "-Z", "build-std=core"];
     if opts.release {
         args.push("--release")
     }

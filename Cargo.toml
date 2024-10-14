@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["xtask", "jeprof", "jeprof-common"]
+members = ["xtask", "jeprofl", "jeprofl-common"]

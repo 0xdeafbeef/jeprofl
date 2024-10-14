@@ -1,5 +1,5 @@
 [package]
-name = "jeprof"
+name = "jeprofl"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -8,7 +8,7 @@ publish = false
 aya = "0.13.0"
 aya-log = "0.2"
 clap = { version = "4.1", features = ["derive"] }
-jeprof-common = { path = "../jeprof-common", features = ["user"] }
+jeprofl-common = { path = "../jeprofl-common", features = ["user"] }
 anyhow = "1"
 env_logger = "0.11.5"
 libc = "0.2"
@@ -27,5 +27,5 @@ inferno = "0.11.21"
 itertools = "0.13.0"
 
 [[bin]]
-name = "jeprof"
+name = "jeprofl"
 path = "src/main.rs"

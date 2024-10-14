@@ -7,7 +7,7 @@ use aya::{include_bytes_aligned, Ebpf};
 use aya_log::EbpfLogger;
 use bytesize::ByteSize;
 use clap::Parser;
-use jeprof_common::{
+use jeprofl_common::{
     Histogram, HistogramKey, COUNT_INDEX, FUNCTION_INFO_INDEX, MAX_ALLOC_INDEX, MIN_ALLOC_INDEX,
     SAMPLE_EVERY_INDEX,
 };
@@ -36,7 +36,7 @@ struct Opt {
     #[clap(short, long, default_value = "malloc")]
     function: JemallocAllocFunctions,
 
-    #[clap(short, long, default_value = "Size")]
+    #[clap(short, long, default_value_t = OrderBy::Count)]
     order_by: OrderBy,
 
     /// Max alloc size to track
@@ -114,13 +114,6 @@ impl Display for JemallocAllocFunctions {
 }
 
 impl JemallocAllocFunctions {
-    // void *malloc(	size_t size);
-    //
-    // void *calloc(	size_t number,
-    // size_t size);
-    //
-    // void *realloc(	void *ptr,
-    // size_t size);
     pub fn allocation_arg_index(&self) -> u64 {
         match self {
             Self::Malloc => 0,
@@ -159,11 +152,11 @@ async fn main() -> Result<(), anyhow::Error> {
     // reach for `Bpf::load_file` instead.
     #[cfg(debug_assertions)]
     let mut bpf = Ebpf::load(include_bytes_aligned!(
-        "../../target/bpfel-unknown-none/debug/jeprof"
+        "../../target/bpfel-unknown-none/debug/jeprofl"
     ))?;
     #[cfg(not(debug_assertions))]
     let mut bpf = Ebpf::load(include_bytes_aligned!(
-        "../../target/bpfel-unknown-none/release/jeprof"
+        "../../target/bpfel-unknown-none/release/jeprofl"
     ))?;
     if let Err(e) = EbpfLogger::init(&mut bpf) {
         // This can happen if you remove all log statements from your eBPF program.

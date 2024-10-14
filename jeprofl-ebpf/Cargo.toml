@@ -6,10 +6,10 @@ edition = "2021"
 [dependencies]
 aya-ebpf = "0.1.0"
 aya-log-ebpf = "0.1.0"
-jeprof-common = { path = "../jeprof-common" }
+jeprofl-common = { path = "../jeprofl-common" }
 
 [[bin]]
-name = "jeprof"
+name = "jeprofl"
 path = "src/main.rs"
 
 [profile.dev]
