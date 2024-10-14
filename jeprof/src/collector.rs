@@ -2,9 +2,11 @@ use crate::resolver::{ResolvedStackTrace, Resolver};
 use crate::OrderBy;
 use aya::maps::{MapData, PerCpuHashMap, StackTraceMap};
 
+use itertools::Itertools;
 use jeprof_common::{Histogram, HistogramKey, ReducedEventKey, UnpackedHistogramKey};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
+use std::io::BufWriter;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -129,6 +131,7 @@ impl EventProcessor {
         order_by: OrderBy,
         mut pager: impl std::fmt::Write,
         csv_path: Option<PathBuf>,
+        flame_graph: Option<PathBuf>,
     ) -> anyhow::Result<()> {
         let stats = self.merge();
         writeln!(pager, "total stack traces: {}\n", stats.len())?;
@@ -164,6 +167,41 @@ impl EventProcessor {
         }
         csv_writer.finish()?;
 
+        if let Some(path) = flame_graph {
+            let file = std::fs::File::create(&path)?;
+            let file = BufWriter::new(file);
+            self.write_flame_graph(file, order_by)?;
+        }
+
+        Ok(())
+    }
+
+    fn write_flame_graph(&self, writer: impl std::io::Write, mode: OrderBy) -> anyhow::Result<()> {
+        let traces = self
+            .allocations_stats
+            .iter()
+            .filter_map(|st| {
+                let symbols = self.resolved_traces.get(&st.0.stack_id)?;
+                let stat = match mode {
+                    OrderBy::Count => st.1.data.iter().sum(),
+                    OrderBy::Traffic => st.1.total,
+                };
+                Some(symbols.as_inferno(stat))
+            })
+            .collect_vec();
+
+        let count_name = match mode {
+            OrderBy::Count => "count",
+            OrderBy::Traffic => "total allocated",
+        };
+
+        let mut settings = inferno::flamegraph::Options::default();
+        settings.count_name = count_name.to_string();
+        settings.reverse_stack_order = true;
+
+        let vec_of_strs = traces.iter().map(|x| x.as_str()).collect_vec();
+
+        inferno::flamegraph::from_lines(&mut settings, vec_of_strs, writer)?;
         Ok(())
     }
 }

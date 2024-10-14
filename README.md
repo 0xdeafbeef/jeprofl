@@ -38,4 +38,5 @@ RUST_LOG=info cargo xtask run
   Pure uprobe uses 20ns per call.
 - [ ] find which malloc is used (now we assume that target is statically linked)
 - [ ] add ratatui based tui
-- [ ] produce flamegraphs
+- [x] produce flamegraphs
+- [ ] add docs and examples 

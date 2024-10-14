@@ -4,6 +4,7 @@ use std::num::NonZeroU32;
 use aya::maps::stack_trace::StackTrace;
 use blazesym::symbolize::{Input, Process, Source, Symbolized};
 use blazesym::Pid;
+use itertools::Itertools;
 
 pub struct Resolver {
     symbolizer: blazesym::symbolize::Symbolizer,
@@ -46,6 +47,15 @@ impl Resolver {
 #[derive(Debug, Clone)]
 pub struct ResolvedStackTrace {
     pub symbols: Vec<OwnedSymbol>,
+}
+
+impl ResolvedStackTrace {
+    pub fn as_inferno(&self, calculation: u64) -> String {
+        let mut symbols: String = self.symbols.iter().map(|x| x.symbol.clone()).join(";");
+        symbols.push(' ');
+        symbols.push_str(&calculation.to_string());
+        symbols
+    }
 }
 
 #[derive(Debug, Clone)]

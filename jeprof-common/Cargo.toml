@@ -8,7 +8,7 @@ default = []
 user = ["aya"]
 
 [dependencies]
-aya = { optional = true, version = "0.12" }
+aya = { optional = true, version = "0.13.0" }
 
 [lib]
 path = "src/lib.rs"

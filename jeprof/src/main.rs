@@ -63,6 +63,9 @@ struct Opt {
 
     #[clap(long("csv"))]
     csv_path: Option<PathBuf>,
+
+    #[clap(long("flame"))]
+    flame_graph: Option<PathBuf>,
 }
 
 #[derive(derive_more::Display, derive_more::FromStr, Debug, Copy, Clone)]
@@ -170,7 +173,7 @@ async fn main() -> Result<(), anyhow::Error> {
     {
         let config_map = bpf.map_mut("CONFIG").expect("CONFIG not found");
         let mut config_map = PerCpuArray::try_from(config_map)?;
-        let num_cpus = nr_cpus()?;
+        let num_cpus = nr_cpus().unwrap();
         config_map.set(
             MIN_ALLOC_INDEX,
             PerCpuValues::try_from(vec![opt.min_alloc_size; num_cpus])?,
@@ -249,7 +252,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let handle = handle.join().expect("failed to join thread");
 
     // let mut str = String::new();
-    handle.print_histogram(opt.order_by, &mut pager, opt.csv_path)?;
+    handle.print_histogram(opt.order_by, &mut pager, opt.csv_path, opt.flame_graph)?;
 
     t.join().unwrap()?;
 
