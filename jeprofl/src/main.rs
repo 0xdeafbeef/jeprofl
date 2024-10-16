@@ -64,6 +64,7 @@ struct Opt {
     #[clap(long("csv"))]
     csv_path: Option<PathBuf>,
 
+    /// Writes a flamegraph to the path_by_size.svg and path_by_count.svg
     #[clap(long("flame"))]
     flame_graph: Option<PathBuf>,
 }

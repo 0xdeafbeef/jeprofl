@@ -168,9 +168,29 @@ impl EventProcessor {
         csv_writer.finish()?;
 
         if let Some(path) = flame_graph {
-            let file = std::fs::File::create(&path)?;
-            let file = BufWriter::new(file);
-            self.write_flame_graph(file, order_by)?;
+            let path_without_extension = match path.file_stem() {
+                Some(stem) => path.with_file_name(stem),
+                None => path,
+            };
+
+            let result = path_without_extension.to_string_lossy();
+            let args = [
+                (
+                    PathBuf::from(format!("{}-by-count.svg", result)),
+                    OrderBy::Count,
+                ),
+                (
+                    PathBuf::from(format!("{}-by-traffic.svg", result)),
+                    OrderBy::Traffic,
+                ),
+            ];
+
+            for (path, order_by) in args {
+                let file = std::fs::File::create(&path)?;
+                let file = BufWriter::new(file);
+                self.write_flame_graph(file, order_by)?;
+                log::info!("Flamegraph written to {:?}", path);
+            }
         }
 
         Ok(())
